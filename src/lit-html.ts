@@ -109,7 +109,19 @@ export function render(
  * An expression marker with embedded unique key to avoid
  * https://github.com/PolymerLabs/lit-html/issues/62
  */
-const exprMarker = `{{lit-${Math.random()}}}`;
+const attributMarker = `{{lit-${Math.random()}}}`;
+
+/**
+ * Regex to scan the string preceding an expression to see if we're in a text
+ * context, and not an attribute context.
+ *
+ * This works by seeing if we have a `>` not followed by a `<`. If there is a
+ * `<` closer to the end of the strings, then we're inside a tag.
+ */
+const textRegex = />[^<]*$/;
+const textMarkerContent = '_-lit-html-_';
+const textMarker = `<!--${textMarkerContent}-->`;
+const attrOrTextRegex = new RegExp(`${attributMarker}|${textMarker}`);
 
 /**
  * A placeholder for a dynamic expression in an HTML template.
@@ -134,6 +146,7 @@ export class TemplatePart {
   }
 }
 
+
 export class Template {
   parts: TemplatePart[] = [];
   element: HTMLTemplateElement;
@@ -144,7 +157,7 @@ export class Template {
     this.element = document.createElement('template');
     this.element.innerHTML = this._getHtml(strings, svg);
     const walker = document.createTreeWalker(
-        this.element.content, 5 /* elements & text */);
+        this.element.content, 133 /* elements & text & comments */);
     let index = -1;
     let partIndex = 0;
     const nodesToRemove = [];
@@ -153,12 +166,13 @@ export class Template {
       index++;
       const node = walker.currentNode as Element;
       if (node.nodeType === 1 /* ELEMENT_NODE */) {
-        if (!node.hasAttributes())
+        if (!node.hasAttributes()) {
           continue;
+        }
         const attributes = node.attributes;
         for (let i = 0; i < attributes.length; i++) {
           const attribute = attributes.item(i);
-          const attributeStrings = attribute.value.split(exprMarker);
+          const attributeStrings = attribute.value.split(attrOrTextRegex);
           if (attributeStrings.length > 1) {
             // Get the template literal section leading up to the first
             // expression in this attribute attribute
@@ -176,7 +190,7 @@ export class Template {
           }
         }
       } else if (node.nodeType === 3 /* TEXT_NODE */) {
-        const strings = node.nodeValue!.split(exprMarker);
+        const strings = node.nodeValue!.split(attributMarker);
         if (strings.length > 1) {
           const parent = node.parentNode!;
           const lastIndex = strings.length - 1;
@@ -199,6 +213,16 @@ export class Template {
           nodesToRemove.push(node);
           index--;
         }
+      } else if (
+          node.nodeType === 8 /* COMMENT_NODE */ &&
+          node.nodeValue === textMarkerContent) {
+        const parent = node.parentNode!;
+        // TODO BEFORE MERGE: use surrounding nodes as markers
+        parent.insertBefore(new Text(), node);
+        parent.insertBefore(new Text(), node);
+        this.parts.push(new TemplatePart('node', index++));
+        partIndex++;
+        nodesToRemove.push(node);
       }
     }
 
@@ -212,7 +236,22 @@ export class Template {
    * Returns a string of HTML used to create a <template> element.
    */
   private _getHtml(strings: TemplateStringsArray, svg?: boolean): string {
-    const html = strings.join(exprMarker);
+    const l = strings.length;
+    const a = new Array((l * 2) - 1);
+    let isTextBinding = false;
+    for (let i = 0; i < l; i++) {
+      const s = strings[i];
+      a.push(s);
+      if (i < l - 1) {
+        // We're in a text position if the previou string matches the
+        // textRegex. If it doesn't and the previous string has no tags, then
+        // we use the previous text position state.
+        isTextBinding = s.match(textRegex) !== null ||
+            (s.match(/[^<]*/) !== null && isTextBinding);
+        a.push(isTextBinding ? textMarker : attributMarker);
+      }
+    }
+    const html = a.join('');
     return svg ? `<svg>${html}</svg>` : html;
   }
 }
